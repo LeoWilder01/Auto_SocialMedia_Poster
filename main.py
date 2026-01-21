@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 from notion_reader import create_reader
 from llm_client import create_client
+from mastodon_poster import create_poster
 
 
 def generate_social_post(notion_content: str, page_title: str) -> str:
@@ -51,6 +52,19 @@ def main():
     print("=" * 40)
     print(post)
     print("=" * 40)
+
+    # Ask user if they want to post to Mastodon
+    print(f"\nCharacter count: {len(post)}/500")
+    user_input = input("\nPost to Mastodon? (y/n): ").strip().lower()
+
+    if user_input == "y":
+        print("Posting to Mastodon...")
+        poster = create_poster()
+        result = poster.post(post)
+        print(f"Posted successfully!")
+        print(f"URL: {result.get('url')}")
+    else:
+        print("Skipped posting.")
 
     return post
 
