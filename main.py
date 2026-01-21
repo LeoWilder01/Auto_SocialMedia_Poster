@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from notion_reader import create_reader
 from llm_client import create_client
 from mastodon_poster import create_poster
+from image_generator import create_generator
 
 
 def generate_social_post(notion_content: str, page_title: str) -> str:
@@ -58,9 +59,20 @@ def main():
     user_input = input("\nPost to Mastodon? (y/n): ").strip().lower()
 
     if user_input == "y":
-        print("Posting to Mastodon...")
+        # Generate image
+        print("\nGenerating image...")
+        generator = create_generator()
+        image_data = generator.generate(post)
+        print("Image generated!")
+
+        # Upload image and post
+        print("Uploading to Mastodon...")
         poster = create_poster()
-        result = poster.post(post)
+        media_id = poster.upload_media(image_data)
+        print(f"Image uploaded (media_id: {media_id})")
+
+        print("Posting...")
+        result = poster.post(post, media_ids=[media_id])
         print(f"Posted successfully!")
         print(f"URL: {result.get('url')}")
     else:
