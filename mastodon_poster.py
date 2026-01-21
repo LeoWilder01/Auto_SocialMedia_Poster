@@ -21,7 +21,8 @@ class MastodonPoster:
         Returns:
             The media_id to use when posting
         """
-        url = f"{self.instance_url}/api/v2/media"
+        # Use v1 API (synchronous) instead of v2 (async)
+        url = f"{self.instance_url}/api/v1/media"
 
         files = {
             "file": (filename, image_data, "image/webp"),
@@ -45,13 +46,14 @@ class MastodonPoster:
         """
         url = f"{self.instance_url}/api/v1/statuses"
 
-        data = {
-            "status": content,
-            "visibility": visibility,
-        }
+        data = [
+            ("status", content),
+            ("visibility", visibility),
+        ]
 
         if media_ids:
-            data["media_ids[]"] = media_ids
+            for media_id in media_ids:
+                data.append(("media_ids[]", media_id))
 
         response = requests.post(url, headers=self.headers, data=data)
         response.raise_for_status()
