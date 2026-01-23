@@ -46,14 +46,13 @@ class MastodonPoster:
         """
         url = f"{self.instance_url}/api/v1/statuses"
 
-        data = [
-            ("status", content),
-            ("visibility", visibility),
-        ]
+        data = {
+            "status": content,
+            "visibility": visibility,
+        }
 
         if media_ids:
-            for media_id in media_ids:
-                data.append(("media_ids[]", media_id))
+            data["media_ids[]"] = media_ids
 
         response = requests.post(url, headers=self.headers, data=data)
         response.raise_for_status()
