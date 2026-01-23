@@ -6,7 +6,7 @@ from app.database import SessionLocal
 from app.config import config
 from app.services.notion import create_reader
 from app.services.rag import get_rag_service
-from app.models.post import NotionPage
+from app.models.post import NotionPage, Post
 
 
 class NotionPoller:
@@ -121,25 +121,113 @@ def get_poller() -> NotionPoller:
 async def on_notion_change(page_id: str):
     """
     Callback when a Notion page changes.
-    Creates a post and sends for approval.
+    Automatically creates a post and sends for Telegram approval.
     """
-    from app.routes.posts import create_post
-    from app.database import SessionLocal
+    from app.services.llm import create_client
+    from app.services.image import create_generator
+    from app.services.mastodon import create_poster
+    from app.services.telegram import request_approval, notify_posted
 
-    print(f"Notion page changed: {page_id}")
-    print("Creating post for approval...")
+    print(f"[AUTO-POST] Notion page changed: {page_id}")
+    print("[AUTO-POST] Starting automatic post creation...")
 
-    # Note: This creates a post request, but the approval flow
-    # is synchronous and waits for Telegram response.
-    # For a fully async flow, you'd need to queue the post creation.
     db = SessionLocal()
     try:
-        # For now, just notify via Telegram that content changed
-        from app.services.telegram import create_approver
-        approver = create_approver()
-        await approver.bot.send_message(
-            approver.chat_id,
-            f"Notion page updated!\n\nPage ID: {page_id}\n\nUse the API to create a post:\nPOST /posts/create/{page_id}"
+        # Read from Notion
+        reader = create_reader()
+        page_info = reader.get_page_info(page_id)
+        page_title = page_info["title"]
+        page_content = page_info["content"]
+
+        print(f"[AUTO-POST] Page title: {page_title}")
+
+        # Get or create NotionPage record
+        notion_page = db.query(NotionPage).filter(NotionPage.page_id == page_id).first()
+        if not notion_page:
+            notion_page = NotionPage(page_id=page_id, title=page_title)
+            db.add(notion_page)
+            db.commit()
+            db.refresh(notion_page)
+
+        # Get RAG context
+        rag_service = get_rag_service(db)
+        rag_context = rag_service.get_context_for_query(page_content[:500], top_k=3)
+        if rag_context:
+            print(f"[AUTO-POST] Using RAG context ({len(rag_context)} chars)")
+
+        # Generate post
+        print("[AUTO-POST] Generating social media post...")
+        llm = create_client()
+        post_content = llm.generate_social_post(page_content, page_title, None, rag_context)
+        print(f"[AUTO-POST] Generated post ({len(post_content)} chars)")
+
+        # Create pending post in DB
+        post = Post(
+            content=post_content,
+            status="pending",
+            notion_page_id=notion_page.id
         )
+        db.add(post)
+        db.commit()
+        db.refresh(post)
+
+        # Generate image
+        print("[AUTO-POST] Generating image...")
+        generator = create_generator()
+        image_data = generator.generate(post_content)
+
+        # Telegram approval loop
+        current_post = post_content
+        while True:
+            print("[AUTO-POST] Sending to Telegram for approval...")
+            result = await request_approval(current_post, image_data)
+
+            if result["approved"]:
+                break
+
+            # Regenerate with new tone
+            new_tone = result["tone"]
+            print(f"[AUTO-POST] Regenerating with {new_tone} tone...")
+            current_post = llm.generate_social_post(page_content, page_title, new_tone, rag_context)
+
+            # Regenerate image
+            image_data = generator.generate(current_post)
+
+            # Update post in DB
+            post.content = current_post
+            db.commit()
+
+        # Post to Mastodon
+        print("[AUTO-POST] Posting to Mastodon...")
+        poster = create_poster()
+        media_id = poster.upload_media(image_data)
+        mastodon_result = poster.post(current_post, media_ids=[media_id])
+
+        # Update post record
+        post.content = current_post
+        post.mastodon_url = mastodon_result.get("url")
+        post.mastodon_id = mastodon_result.get("id")
+        post.status = "posted"
+        post.posted_at = datetime.utcnow()
+        db.commit()
+
+        # Notify via Telegram
+        await notify_posted(post.mastodon_url)
+
+        print(f"[AUTO-POST] Posted successfully: {post.mastodon_url}")
+
+    except Exception as e:
+        print(f"[AUTO-POST] Error: {e}")
+        # Notify about error via Telegram
+        try:
+            from app.services.telegram import create_approver
+            approver = create_approver()
+            await approver.bot.send_message(
+                approver.chat_id,
+                f"Auto-post failed!\n\nPage: {page_id}\nError: {str(e)}"
+            )
+        except:
+            pass
+
     finally:
         db.close()
