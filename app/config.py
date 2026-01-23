@@ -10,6 +10,7 @@ class Config:
 
     # Notion
     NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "")
+    NOTION_PAGE_ID: str = os.getenv("NOTION_PAGE_ID", "")
 
     # OpenRouter (LLM)
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
