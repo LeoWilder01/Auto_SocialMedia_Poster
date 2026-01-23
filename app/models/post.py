@@ -16,6 +16,7 @@ class NotionPage(Base):
     last_processed_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     posts = relationship("Post", back_populates="notion_page")
+    chunks = relationship("Chunk", back_populates="notion_page")
 
 
 class Post(Base):

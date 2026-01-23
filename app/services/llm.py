@@ -40,16 +40,25 @@ class LLMClient:
         )
         return response.output_text
 
-    def generate_social_post(self, notion_content: str, page_title: str, tone: str = None) -> str:
-        """Generate a social media post from Notion content."""
+    def generate_social_post(self, notion_content: str, page_title: str, tone: str = None, rag_context: str = None) -> str:
+        """Generate a social media post from Notion content with optional RAG context."""
         system_prompt = TONE_PROMPTS.get(tone, TONE_PROMPTS[None])
 
+        # Build user message with optional RAG context
         user_message = f"""Create a social media post based on this content:
 
 Title: {page_title}
 
 Content:
 {notion_content}"""
+
+        if rag_context:
+            user_message += f"""
+
+---
+Relevant context from knowledge base (use this to inform your post style and content):
+{rag_context}
+---"""
 
         return self.generate(system_prompt, user_message)
 

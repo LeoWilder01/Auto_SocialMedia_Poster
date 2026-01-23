@@ -84,6 +84,24 @@ class NotionReader:
 
         return "Untitled"
 
+    def get_last_edited_time(self, page_id: str) -> str:
+        """Get the last edited time of a page."""
+        page = self.get_page(page_id)
+        return page.get("last_edited_time", "")
+
+    def get_page_info(self, page_id: str) -> dict:
+        """Get page title, content, and last edited time."""
+        page = self.get_page(page_id)
+        title = self.get_page_title(page_id)
+        content = self.get_page_content(page_id)
+        last_edited = page.get("last_edited_time", "")
+
+        return {
+            "title": title,
+            "content": content,
+            "last_edited_time": last_edited
+        }
+
 
 def create_reader() -> NotionReader:
     """Create a NotionReader using config."""

@@ -6,11 +6,13 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.auth import verify_api_key
 from app.models.post import Post, NotionPage
+from app.models.chunk import Chunk
 from app.services.notion import create_reader
 from app.services.llm import create_client
 from app.services.mastodon import create_poster
 from app.services.image import create_generator
 from app.services.telegram import request_approval, notify_posted
+from app.services.rag import get_rag_service
 
 router = APIRouter(prefix="/posts", tags=["posts"])
 
@@ -40,6 +42,14 @@ class NotionPageResponse(BaseModel):
 
 class CreatePostRequest(BaseModel):
     tone: str | None = None
+    use_rag: bool = True  # Enable RAG by default
+
+
+class IndexResponse(BaseModel):
+    page_id: str
+    title: str
+    chunks_created: int
+    message: str
 
 
 @router.get("", response_model=list[PostResponse])
@@ -65,6 +75,42 @@ async def get_post(
     return post
 
 
+@router.post("/index/{notion_page_id}", response_model=IndexResponse)
+async def index_notion_page(
+    notion_page_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key)
+):
+    """
+    Index a Notion page for RAG.
+    Chunks the content and creates embeddings.
+    """
+    reader = create_reader()
+    page_info = reader.get_page_info(notion_page_id)
+
+    # Get or create NotionPage record
+    notion_page = db.query(NotionPage).filter(NotionPage.page_id == notion_page_id).first()
+    if not notion_page:
+        notion_page = NotionPage(page_id=notion_page_id, title=page_info["title"])
+        db.add(notion_page)
+        db.commit()
+        db.refresh(notion_page)
+
+    # Index the page
+    rag_service = get_rag_service(db)
+    chunks_created = rag_service.index_notion_page(notion_page, page_info["content"])
+
+    # Update page state
+    rag_service.update_page_state(notion_page_id, page_info["content"], page_info["last_edited_time"])
+
+    return IndexResponse(
+        page_id=notion_page_id,
+        title=page_info["title"],
+        chunks_created=chunks_created,
+        message=f"Successfully indexed {chunks_created} chunks"
+    )
+
+
 @router.post("/create/{notion_page_id}", response_model=PostResponse)
 async def create_post(
     notion_page_id: str,
@@ -73,23 +119,26 @@ async def create_post(
     _: str = Depends(verify_api_key)
 ):
     """
-    Create a post from a Notion page.
+    Create a post from a Notion page with RAG-enhanced generation.
 
     This endpoint:
     1. Reads content from Notion
-    2. Generates social media post with LLM
-    3. Generates an image
-    4. Sends to Telegram for approval
-    5. Posts to Mastodon when approved
-    6. Saves to database
+    2. Retrieves relevant context using hybrid search (RAG)
+    3. Generates social media post with LLM + context
+    4. Generates an image
+    5. Sends to Telegram for approval
+    6. Posts to Mastodon when approved
+    7. Saves to database
     """
     tone = request.tone if request else None
+    use_rag = request.use_rag if request else True
 
     # Read from Notion
     print(f"Reading Notion page: {notion_page_id}")
     reader = create_reader()
-    page_title = reader.get_page_title(notion_page_id)
-    page_content = reader.get_page_content(notion_page_id)
+    page_info = reader.get_page_info(notion_page_id)
+    page_title = page_info["title"]
+    page_content = page_info["content"]
 
     # Track Notion page
     notion_page = db.query(NotionPage).filter(NotionPage.page_id == notion_page_id).first()
@@ -102,10 +151,25 @@ async def create_post(
         notion_page.last_processed_at = datetime.utcnow()
         db.commit()
 
-    # Generate post
+    # RAG: Check if page changed and re-index if needed
+    rag_service = get_rag_service(db)
+    if rag_service.check_notion_changed(notion_page_id, page_content, page_info["last_edited_time"]):
+        print("Notion page changed, re-indexing...")
+        chunks_created = rag_service.index_notion_page(notion_page, page_content)
+        print(f"Indexed {chunks_created} chunks")
+
+    # RAG: Get relevant context
+    rag_context = None
+    if use_rag:
+        print("Retrieving RAG context...")
+        rag_context = rag_service.get_context_for_query(page_content[:500], top_k=3)
+        if rag_context:
+            print(f"Found RAG context ({len(rag_context)} chars)")
+
+    # Generate post with RAG context
     print("Generating social media post...")
     llm = create_client()
-    post_content = llm.generate_social_post(page_content, page_title, tone)
+    post_content = llm.generate_social_post(page_content, page_title, tone, rag_context)
     print(f"Generated post ({len(post_content)} chars):\n{post_content}")
 
     # Create pending post in DB
@@ -132,10 +196,10 @@ async def create_post(
         if result["approved"]:
             break
 
-        # Regenerate with new tone
+        # Regenerate with new tone (still using RAG context)
         new_tone = result["tone"]
         print(f"Regenerating with {new_tone} tone...")
-        current_post = llm.generate_social_post(page_content, page_title, new_tone)
+        current_post = llm.generate_social_post(page_content, page_title, new_tone, rag_context)
         print(f"Regenerated post:\n{current_post}")
 
         # Regenerate image
@@ -175,3 +239,23 @@ async def list_notion_pages(
     """List all processed Notion pages."""
     pages = db.query(NotionPage).order_by(NotionPage.last_processed_at.desc()).all()
     return pages
+
+
+@router.get("/chunks/", response_model=list[dict])
+async def list_chunks(
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key)
+):
+    """List all indexed chunks."""
+    chunks = db.query(Chunk).order_by(Chunk.notion_page_id, Chunk.chunk_index).all()
+    return [
+        {
+            "id": c.id,
+            "notion_page_id": c.notion_page_id,
+            "chunk_index": c.chunk_index,
+            "text_preview": c.text[:100] + "..." if len(c.text) > 100 else c.text,
+            "token_count": c.token_count,
+            "has_embedding": c.embedding is not None
+        }
+        for c in chunks
+    ]
